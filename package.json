@@ -1,0 +1,50 @@
+{
+  "name": "tool-forge",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/tools.test.ts test/http.test.ts test/e2e.test.ts",
+    "dev": "tsx src/cli.ts",
+    "prepublishOnly": "npm run build && npm test",
+    "prepare": "tsc"
+  },
+  "keywords": [
+    "mcp",
+    "openapi",
+    "model-context-protocol",
+    "agents",
+    "llm",
+    "tools"
+  ],
+  "author": "Mohamed Ali (https://mohameda.li)",
+  "license": "MIT",
+  "description": "Turn any OpenAPI spec into a production MCP server: auth, rate limits, retries, audit log, read-only by default.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.11",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  },
+  "type": "module",
+  "bin": {
+    "tool-forge": "dist/cli.js"
+  },
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moeealii/tool-forge.git"
+  }
+}

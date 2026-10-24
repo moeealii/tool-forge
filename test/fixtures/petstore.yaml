@@ -1,0 +1,118 @@
+openapi: 3.0.3
+info:
+  title: Petstore
+  version: 1.0.0
+servers:
+  - url: https://{region}.petstore.example/v1
+    variables:
+      region:
+        default: ca
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      summary: List pets
+      tags: [pets]
+      parameters:
+        - name: tag
+          in: query
+          schema: { type: array, items: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 100 }
+        - name: filter
+          in: query
+          style: deepObject
+          schema:
+            type: object
+            properties:
+              status: { type: string }
+        - name: X-Request-Id
+          in: header
+          schema: { type: string }
+        - name: Authorization
+          in: header
+          schema: { type: string }
+      responses:
+        "200": { description: ok }
+    post:
+      operationId: createPet
+      summary: Create a pet
+      tags: [pets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Pet" }
+      responses:
+        "201": { description: created }
+  /pets/{petId}:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getPet
+      summary: Get a pet
+      tags: [pets]
+      responses:
+        "200": { description: ok }
+    delete:
+      operationId: deletePet
+      summary: Delete a pet
+      tags: [pets]
+      responses:
+        "204": { description: gone }
+  /pets/{petId}/photo:
+    post:
+      operationId: uploadPhoto
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: { type: object }
+      responses:
+        "200": { description: ok }
+  /login:
+    post:
+      operationId: login
+      tags: [auth]
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "200": { description: ok }
+  /search:
+    get:
+      summary: Search everything
+      parameters:
+        - name: body
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: ok }
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, readOnly: true }
+        name: { type: string, example: Rex }
+        nickname: { type: string, nullable: true }
+        category: { $ref: "#/components/schemas/Category" }
+    Category:
+      type: object
+      properties:
+        name: { type: string }
+        parent: { $ref: "#/components/schemas/Category" }
