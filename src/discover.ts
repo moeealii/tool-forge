@@ -1,13 +1,9 @@
 import type { ToolDef } from "./tools.js";
 
 /**
- * Large APIs (GitHub has ~1,200 operations) blow past what a model can usefully
- * hold in its tool list. Discovery mode exposes two tools instead: search the
- * catalogue, then call an operation by name. Schemas are only sent for the
- * operations the model actually looks at.
+ * Search over an API's operations, used by code mode's `search_api` tool when
+ * an API is too large to describe in full (GitHub has ~1,200 operations).
  */
-export const FIND_TOOL = "find_operations";
-export const CALL_TOOL = "call_operation";
 
 export interface Match {
   name: string;
@@ -137,45 +133,4 @@ export function searchTools(tools: ToolDef[], query: string, limit: number): Mat
       inputSchema: t.inputSchema,
       readOnly: t.annotations.readOnlyHint,
     }));
-}
-
-export function discoveryTools(tools: ToolDef[], apiName: string) {
-  const writes = tools.some((t) => !t.annotations.readOnlyHint);
-  return [
-    {
-      name: FIND_TOOL,
-      description:
-        `Search the ${tools.length} operations of the ${apiName} API. Returns the best matches with ` +
-        `their input schemas. Call this first, then use ${CALL_TOOL} with an exact name.`,
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          query: { type: "string", description: 'What you want to do, e.g. "list open pull requests"' },
-          limit: { type: "integer", minimum: 1, maximum: 20, default: 5 },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-      annotations: { title: "Find API operations", readOnlyHint: true, openWorldHint: false },
-    },
-    {
-      name: CALL_TOOL,
-      description: `Call one ${apiName} API operation by the exact name returned from ${FIND_TOOL}.`,
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          name: { type: "string", description: `Operation name from ${FIND_TOOL}` },
-          arguments: { type: "object", description: "Arguments matching that operation's input schema" },
-        },
-        required: ["name"],
-        additionalProperties: false,
-      },
-      annotations: {
-        title: "Call an API operation",
-        readOnlyHint: !writes,
-        destructiveHint: tools.some((t) => t.annotations.destructiveHint),
-        openWorldHint: true,
-      },
-    },
-  ];
 }

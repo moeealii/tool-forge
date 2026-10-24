@@ -34,7 +34,11 @@ paths:
           in: header
           schema: { type: string }
       responses:
-        "200": { description: ok }
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Pet" } }
     post:
       operationId: createPet
       summary: Create a pet
@@ -57,7 +61,12 @@ paths:
       summary: Get a pet
       tags: [pets]
       responses:
-        "200": { description: ok }
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+        "404": { description: not found }
     delete:
       operationId: deletePet
       summary: Delete a pet

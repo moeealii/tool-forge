@@ -61,7 +61,10 @@ async function connect(baseUrl: string, extra: string[]) {
   return client;
 }
 
-describe("tool-forge over stdio", () => {
+const textOf = (r: unknown) => ((r as { content: { text: string }[] }).content[0]!.text);
+const exec = (client: Client, code: string) => client.callTool({ name: "execute", arguments: { code } });
+
+describe("code mode over stdio", () => {
   const api = petApi();
   let baseUrl: string;
   before(async () => {
@@ -71,60 +74,103 @@ describe("tool-forge over stdio", () => {
   });
   after(() => api.server.close());
 
-  it("serves read-only tools by default and calls the real API", async () => {
+  it("exposes one execute tool that documents the typed api", async () => {
     const client = await connect(baseUrl, ["--rps", "0"]);
     try {
       const { tools } = await client.listTools();
-      assert.deepEqual(tools.map((t) => t.name).sort(), ["getPet", "get_search", "listPets"]);
-      assert.equal(tools.find((t) => t.name === "getPet")!.annotations?.readOnlyHint, true);
-
-      const res = await client.callTool({ name: "getPet", arguments: { petId: "1" } });
-      assert.equal(res.isError, false);
-      assert.match((res.content as { text: string }[])[0]!.text, /"name": "Rex"/);
-      assert.equal(api.requests.at(-1)!.auth, "Bearer e2e-token");
-
-      const missing = await client.callTool({ name: "getPet", arguments: { petId: "999" } });
-      assert.equal(missing.isError, true);
-      assert.match((missing.content as { text: string }[])[0]!.text, /HTTP 404[\s\S]*no such pet/);
+      assert.deepEqual(tools.map((t) => t.name), ["execute"]);
+      const description = tools[0]!.description!;
+      assert.match(description, /getPet\(args: \{\n\s+petId: string;\n\s+\}\): Promise<\{/);
+      assert.doesNotMatch(description, /deletePet/, "write operations are not in the api by default");
+      assert.equal(tools[0]!.annotations?.readOnlyHint, true);
     } finally {
       await client.close();
     }
   });
 
-  it("retries through a transient 503", async () => {
+  it("runs a script that chains calls, filters, and returns only the answer", async () => {
+    const client = await connect(baseUrl, ["--rps", "0"]);
+    try {
+      const res = await exec(client, `
+        const pets = await api.listPets({ limit: 10 });
+        const full = await Promise.all(pets.map((p) => api.getPet({ petId: p.id })));
+        console.log("checked", full.length);
+        return full.map((p) => p.name);
+      `);
+      assert.equal(res.isError, false);
+      const out = textOf(res);
+      assert.match(out, /^\[\n  "Rex"\n\]/);
+      assert.match(out, /--- console ---\nchecked 1/);
+      assert.match(out, /--- 2 API calls · \d+ ms ---$/);
+      assert.equal(api.requests.at(-1)!.auth, "Bearer e2e-token", "auth is added on the host side");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("surfaces API errors as ApiError the script can catch", async () => {
+    const client = await connect(baseUrl, ["--rps", "0"]);
+    try {
+      const caught = await exec(client, `
+        try { await api.getPet({ petId: "999" }); } catch (e) { return [e.name, e.status, e.body.error]; }
+      `);
+      assert.match(textOf(caught), /"ApiError",\s+404,\s+"no such pet"/);
+
+      const uncaught = await exec(client, `const p = await api.getPet({ petId: "999" });\nreturn p;`);
+      assert.equal(uncaught.isError, true);
+      assert.match(textOf(uncaught), /^Error: ApiError: HTTP 404 Not Found\nResponse body: \{"error":"no such pet"\}/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("retries through a transient 503 inside a script", async () => {
     const client = await connect(baseUrl, ["--rps", "0"]);
     try {
       api.failOnce();
       const before = api.requests.length;
-      const res = await client.callTool({ name: "listPets", arguments: { limit: 1 } });
-      assert.equal(res.isError, false);
+      const res = await exec(client, "return (await api.listPets()).length;");
+      assert.equal(textOf(res).split("\n")[0], "1");
       assert.equal(api.requests.length - before, 2);
     } finally {
       await client.close();
     }
   });
 
-  it("creates and deletes only with --allow-writes", async () => {
+  it("only puts write operations in the api with --allow-writes", async () => {
     const client = await connect(baseUrl, ["--rps", "0", "--allow-writes", "--include", "pets"]);
     try {
       const { tools } = await client.listTools();
-      assert.equal(tools.find((t) => t.name === "deletePet")!.annotations?.destructiveHint, true);
+      assert.equal(tools[0]!.annotations?.destructiveHint, true);
+      const res = await exec(client, `
+        const pet = await api.createPet({ body: { name: "Mochi" } });
+        await api.deletePet({ petId: pet.id });
+        return pet.name;
+      `);
+      assert.equal(textOf(res).split("\n")[0], '"Mochi"');
+      assert.ok(![...api.pets.values()].some((p) => p.name === "Mochi"));
+    } finally {
+      await client.close();
+    }
+  });
 
-      const created = await client.callTool({ name: "createPet", arguments: { body: { name: "Mochi" } } });
-      assert.equal(created.isError, false);
-      const id = JSON.parse((created.content as { text: string }[])[0]!.text).id as string;
-      assert.equal(api.pets.get(id)?.name, "Mochi");
+  it("enforces the call budget and the time limit", async () => {
+    const client = await connect(baseUrl, ["--rps", "0", "--max-calls", "3", "--exec-timeout", "1000"]);
+    try {
+      const budget = await exec(client, "for (let i = 0; i < 5; i++) await api.listPets();");
+      assert.equal(budget.isError, true);
+      assert.match(textOf(budget), /call limit reached \(3 API calls per execution\)/);
 
-      const deleted = await client.callTool({ name: "deletePet", arguments: { petId: id } });
-      assert.equal(deleted.isError, false);
-      assert.equal(api.pets.has(id), false);
+      const spin = await exec(client, "while (true) {}");
+      assert.equal(spin.isError, true);
+      assert.match(textOf(spin), /CPU time limit reached/);
     } finally {
       await client.close();
     }
   });
 });
 
-describe("discovery mode", () => {
+describe("code mode for large APIs", () => {
   const api = petApi();
   let baseUrl: string;
   before(async () => {
@@ -134,25 +180,18 @@ describe("discovery mode", () => {
   });
   after(() => api.server.close());
 
-  it("exposes find_operations + call_operation and routes through them", async () => {
-    const client = await connect(baseUrl, ["--rps", "0", "--discover", "on"]);
+  it("adds search_api and leaves the declarations out of execute", async () => {
+    const client = await connect(baseUrl, ["--rps", "0", "--inline-types", "100"]);
     try {
       const { tools } = await client.listTools();
-      assert.deepEqual(tools.map((t) => t.name), ["find_operations", "call_operation"]);
-      assert.equal(tools[1]!.annotations?.readOnlyHint, true, "read-only server => read-only call_operation");
+      assert.deepEqual(tools.map((t) => t.name), ["execute", "search_api"]);
+      assert.doesNotMatch(tools[0]!.description!, /getPet\(/);
+      assert.match(tools[0]!.description!, /Use search_api/);
 
-      const found = await client.callTool({ name: "find_operations", arguments: { query: "get a pet by id" } });
-      const matches = JSON.parse((found.content as { text: string }[])[0]!.text) as { name: string; inputSchema: object }[];
-      assert.equal(matches[0]!.name, "getPet");
-      assert.ok(matches[0]!.inputSchema, "schemas come back with the matches");
-
-      const called = await client.callTool({ name: "call_operation", arguments: { name: "getPet", arguments: { petId: "1" } } });
-      assert.equal(called.isError, false);
-      assert.match((called.content as { text: string }[])[0]!.text, /Rex/);
-
-      const bad = await client.callTool({ name: "call_operation", arguments: { name: "nope" } });
-      assert.equal(bad.isError, true);
-      assert.match((bad.content as { text: string }[])[0]!.text, /Use find_operations/);
+      const found = await client.callTool({ name: "search_api", arguments: { query: "get a pet by id", limit: 1 } });
+      assert.match(textOf(found), /^declare const api: \{[\s\S]*getPet\(args: \{/);
+      const res = await exec(client, 'return (await api.getPet({ petId: "1" })).name;');
+      assert.equal(textOf(res).split("\n")[0], '"Rex"');
     } finally {
       await client.close();
     }

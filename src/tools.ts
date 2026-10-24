@@ -34,6 +34,8 @@ export interface ToolDef {
   tags: string[];
   params: ParamBinding[];
   body?: { contentType: string; required: boolean };
+  /** JSON schema of the success response, when the spec declares one. */
+  responseSchema?: Json;
 }
 
 export interface SkippedOperation {
@@ -174,6 +176,7 @@ function buildTool(
   return {
     name,
     description,
+    responseSchema: successSchema(op),
     inputSchema: { type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: false },
     annotations: {
       title: summary || `${method.toUpperCase()} ${path}`,
@@ -189,6 +192,20 @@ function buildTool(
     params,
     body,
   };
+}
+
+/** The JSON schema of the first 2xx (or default) response with a JSON body. */
+function successSchema(op: JsonObject): Json | undefined {
+  const responses = isObject(op.responses) ? op.responses : {};
+  const codes = Object.keys(responses).sort();
+  for (const code of [...codes.filter((c) => /^2/.test(c)), ...codes.filter((c) => c === "default")]) {
+    const r = responses[code];
+    const content = isObject(r) && isObject(r.content) ? r.content : {};
+    const type = Object.keys(content).find((t) => /json/i.test(t));
+    const media = type ? content[type] : undefined;
+    if (isObject(media) && isObject(media.schema)) return cleanSchema(media.schema, "response");
+  }
+  return undefined;
 }
 
 /** Operation-level parameters override path-level ones with the same name+in. */

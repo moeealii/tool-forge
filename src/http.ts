@@ -38,6 +38,17 @@ export interface PreparedRequest {
   body?: string;
 }
 
+export interface InvokeResult {
+  ok: boolean;
+  status?: number;
+  statusText?: string;
+  /** Parsed JSON, a string for text bodies, or null when there was no body. */
+  body?: unknown;
+  /** Why the request failed before a response arrived (bad arguments, network). */
+  error?: string;
+  attempts: number;
+}
+
 export interface CallResult {
   ok: boolean;
   status?: number;
@@ -190,13 +201,34 @@ export class Executor {
     this.secretQuery = secretQueryNames(opts.auth);
   }
 
+  /** Call an operation and render the response as text (for the CLI's `call` command). */
   async call(tool: ToolDef, args: Record<string, unknown>): Promise<CallResult> {
+    const r = await this.invoke(tool, args);
+    if (r.status === undefined && !r.ok) return { ok: false, text: r.error ?? "request failed", attempts: r.attempts };
+    let text = render(r);
+    const max = this.opts.maxResponseChars;
+    if (text.length > max) {
+      text = `${text.slice(0, max)}
+
+[truncated: showing ${max} of ${text.length} characters. Narrow the request with filters or pagination.]`;
+    }
+    if (r.ok) return { ok: true, status: r.status, text, attempts: r.attempts };
+    return { ok: false, status: r.status, text: `HTTP ${r.status} ${r.statusText ?? ""}
+${text}`.trim(), attempts: r.attempts };
+  }
+
+  /**
+   * Call an operation and return the parsed response: JSON bodies as values,
+   * text as a string. Used by code mode, where the script does the filtering.
+   * Never throws for API or network failures; `ok: false` carries the reason.
+   */
+  async invoke(tool: ToolDef, args: Record<string, unknown>): Promise<InvokeResult> {
     const started = Date.now();
     let req: PreparedRequest;
     try {
       req = prepareRequest(tool, args, this.opts.baseUrl);
     } catch (err) {
-      if (err instanceof ArgumentError) return { ok: false, text: `Invalid arguments: ${err.message}`, attempts: 0 };
+      if (err instanceof ArgumentError) return { ok: false, error: `Invalid arguments: ${err.message}`, attempts: 0 };
       throw err;
     }
     for (const [k, v] of Object.entries(this.opts.headers ?? {})) req.headers.set(k, v);
@@ -213,12 +245,17 @@ export class Executor {
       ok: result.ok,
       attempts: result.attempts,
       ms: Date.now() - started,
-      ...(result.ok ? {} : { error: result.text.slice(0, 300) }),
+      ...(result.ok ? {} : { error: (result.error ?? render(result)).slice(0, 300) }),
     });
     return result;
   }
 
-  private async send(tool: ToolDef, req: PreparedRequest): Promise<CallResult> {
+  /** Record one code-mode execution in the audit log (the API calls it made are logged separately). */
+  auditExecution(entry: { ms: number; calls: number; ok: boolean; codeChars: number; error?: string }): Promise<void> {
+    return this.audit({ ts: new Date(Date.now() - entry.ms).toISOString(), type: "execute", ...entry });
+  }
+
+  private async send(tool: ToolDef, req: PreparedRequest): Promise<InvokeResult> {
     const idempotent = IDEMPOTENT.has(tool.method);
     let attempt = 0;
     for (;;) {
@@ -241,7 +278,7 @@ export class Executor {
           continue;
         }
         const reason = (err as Error).name === "TimeoutError" ? `timed out after ${this.opts.timeoutMs} ms` : describe(err);
-        return { ok: false, text: `Request failed: ${req.method} ${this.redactUrl(req.url)}: ${reason}`, attempts: attempt };
+        return { ok: false, error: `Request failed: ${req.method} ${this.redactUrl(req.url)}: ${reason}`, attempts: attempt };
       }
 
       const retryable = res.status === 429 || (idempotent && RETRY_STATUS.has(res.status));
@@ -250,33 +287,9 @@ export class Executor {
         await this.sleep(retryAfter(res.headers.get("retry-after")) ?? backoff(attempt));
         continue;
       }
-      const text = await this.renderBody(res);
-      if (res.ok) return { ok: true, status: res.status, text, attempts: attempt };
-      return { ok: false, status: res.status, text: `HTTP ${res.status} ${res.statusText}\n${text}`.trim(), attempts: attempt };
+      const body = await parseBody(res);
+      return { ok: res.ok, status: res.status, statusText: res.statusText, body, attempts: attempt };
     }
-  }
-
-  private async renderBody(res: Response): Promise<string> {
-    if (res.status === 204 || res.status === 205) return `HTTP ${res.status} (no content)`;
-    const type = res.headers.get("content-type") ?? "";
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length === 0) return `HTTP ${res.status} (empty body)`;
-    let text: string;
-    if (/json/i.test(type)) {
-      const raw = buf.toString("utf8");
-      try {
-        text = JSON.stringify(JSON.parse(raw), null, 2);
-      } catch {
-        text = raw;
-      }
-    } else if (/^text\/|xml|javascript|yaml|csv/i.test(type) || type === "") {
-      text = buf.toString("utf8");
-    } else {
-      return `Binary response: ${type}, ${buf.length} bytes (not shown)`;
-    }
-    const max = this.opts.maxResponseChars;
-    if (text.length <= max) return text;
-    return `${text.slice(0, max)}\n\n[truncated: showing ${max} of ${text.length} characters. Narrow the request with filters or pagination.]`;
   }
 
   /** Drop values of auth and secret-looking query parameters before anything is logged. */
@@ -301,6 +314,30 @@ export class Executor {
       });
     return this.auditQueue;
   }
+}
+
+/** Read a response body: JSON is parsed, text is returned as a string, binary is described. */
+async function parseBody(res: Response): Promise<unknown> {
+  if (res.status === 204 || res.status === 205) return null;
+  const type = res.headers.get("content-type") ?? "";
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length === 0) return null;
+  if (/json/i.test(type)) {
+    const raw = buf.toString("utf8");
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
+  if (/^text\/|xml|javascript|yaml|csv/i.test(type) || type === "") return buf.toString("utf8");
+  return `Binary response: ${type}, ${buf.length} bytes (not shown)`;
+}
+
+/** The text form of a response, as the CLI prints it. */
+function render(r: InvokeResult): string {
+  if (r.body === null || r.body === undefined) return `HTTP ${r.status ?? ""} (no content)`.trim();
+  return typeof r.body === "string" ? r.body : JSON.stringify(r.body, null, 2);
 }
 
 /** Exponential backoff with full jitter: 0.25 s, 0.5 s, 1 s … capped at 8 s. */

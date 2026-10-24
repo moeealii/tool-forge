@@ -1,28 +1,33 @@
 {
   "name": "tool-forge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/tools.test.ts test/http.test.ts test/e2e.test.ts",
+    "test": "node --import tsx --test test/tools.test.ts test/http.test.ts test/typegen.test.ts test/sandbox.test.ts test/e2e.test.ts",
     "dev": "tsx src/cli.ts",
     "prepublishOnly": "npm run build && npm test",
     "prepare": "tsc"
   },
   "keywords": [
-    "mcp",
-    "openapi",
-    "model-context-protocol",
     "agents",
+    "code-mode",
     "llm",
+    "mcp",
+    "model-context-protocol",
+    "openapi",
+    "quickjs",
+    "sandbox",
     "tools"
   ],
   "author": "Mohamed Ali (https://mohameda.li)",
   "license": "MIT",
-  "description": "Turn any OpenAPI spec into a production MCP server: auth, rate limits, retries, audit log, read-only by default.",
+  "description": "Turn any OpenAPI spec into a code-mode MCP server: the model writes JavaScript against a typed api in a QuickJS sandbox, with auth, rate limits, retries and an audit log on the host.",
   "dependencies": {
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
     "@modelcontextprotocol/sdk": "1.32.1",
+    "quickjs-emscripten-core": "0.32.0",
     "yaml": "2.9.1"
   },
   "devDependencies": {
